@@ -355,11 +355,13 @@ static void hashNonce(blake2b_state *S, uint32_t nonce)
 int main(int argc, char **argv)
 {
     blake2b_state digest[1];
-    int n = 200, k = 9;
+    int n, k;
     char *ii = "block header";
     uint64_t nonce = 0;
 
     if (argc < 3) {
+	printf("%s N K [I] [nonce]\n", argv[0]);
+	exit(1);
     }
     if (argc >= 3) {
 	n = atoi(argv[1]);
