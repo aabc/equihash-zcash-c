@@ -4,13 +4,13 @@ BLAKE2_imp = blake2b.c
 CC         = gcc
 CFLAGS     = -O3 -march=native
 
-all: equihash equihash-opt
+all: basicSolver basicSolver-opt
 
-equihash: equihash.c
+basicSolver: basicSolver.c
 	$(CC) -std=c99 -I$(BLAKE2_dir) $(CFLAGS) -o $@ $< $(BLAKE2_dir)/$(BLAKE2_imp)
 
-equihash-opt: equihash-opt.c
+basicSolver-opt: basicSolver-opt.c
 	$(CC) -std=c99 -I$(BLAKE2_dir) $(CFLAGS) -o $@ $< $(BLAKE2_dir)/$(BLAKE2_imp)
 
 clean:
-	-rm -f equihash equihash-opt
+	-rm -f basicSolver basicSolver-opt
