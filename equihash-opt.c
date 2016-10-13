@@ -248,17 +248,21 @@ void basicSolve(blake2b_state *digest, const int n, const int k)
        	initSize, initSize * fullWidth); // 2097152, 2160066560
 
     uint8_t hash[fullWidth];
-    size_t x_room  = initSize;
-    size_t xc_room = initSize;
-    uint8_t *x  = malloc(x_room  * sizeof(hash));
-    uint8_t *xc = malloc(xc_room * sizeof(hash)); // merge list
+    size_t x_room  = initSize * sizeof(hash);
+    size_t xc_room = initSize * sizeof(hash);
+    uint8_t *x  = malloc(x_room);
+    uint8_t *xc = malloc(xc_room); // merge array
     assert(x);
     assert(xc);
-#define X(y)  (x  + sizeof(hash) * (y))
-#define Xc(y) (xc + sizeof(hash) * (y))
+#define X(y)  (x  + (hashLen                       + lenIndices)     * (y))
+#define Xc(y) (xc + (hashLen - collisionByteLength + lenIndices * 2) * (y))
 
-    uint8_t tmpHash[hashOutput];
     uint32_t x_size = 0, xc_size = 0;
+    uint8_t tmpHash[hashOutput];
+    size_t hashLen    = hashLength;       /* Offset of indices array;
+					     shortens linearly by collisionByteLength. */
+    size_t lenIndices = sizeof(uint32_t); /* Byte length of indices array;
+					     doubles with every round. */
     printf("Generating first list\n");
     for (uint32_t g = 0; x_size < initSize; g++) {
 	generateHash(digest, g, tmpHash, hashOutput);
@@ -268,19 +272,15 @@ void basicSolve(blake2b_state *digest, const int n, const int k)
 		hash, hashLength,
 		collisionBitLength, 0);
 	    ehIndexToArray(g * indicesPerHashOutput + i, hash + hashLength);
-	    memcpy(X(x_size), hash, hashLength + sizeof(uint32_t));
+	    memcpy(X(x_size), hash, hashLen + lenIndices);
 	    ++x_size;
 	}
     }
 
-    size_t hashLen    = hashLength;       /* Offset of indices array;
-					     shortens linearly by collisionByteLength. */
-    size_t lenIndices = sizeof(uint32_t); /* Byte length of indices array;
-					     doubles with every round. */
     for (int r = 1; r < k && x_size > 0; r++) {
 	printf("Round %d:\n", r);
-	printf("- Sorting list (size %d, %ld)\n", x_size, x_size * sizeof(hash));
-	qsort_r(x, x_size, sizeof(hash), compareSR, (int *)&collisionByteLength);
+	printf("- Sorting list (size %d, %ld)\n", x_size, x_size * (hashLen + lenIndices));
+	qsort_r(x, x_size, hashLen + lenIndices, compareSR, (int *)&collisionByteLength);
 
 	printf("- Finding collisions\n");
 	for (int i = 0; i < x_size - 1; ) {
@@ -297,10 +297,11 @@ void basicSolve(blake2b_state *digest, const int n, const int k)
 		    if (distinctIndices(X(i + l), X(i + m), hashLen, lenIndices)) {
 			combineRows(Xc(xc_size), X(i + l), X(i + m), hashLen, lenIndices, collisionByteLength);
 			++xc_size;
-			if (xc_size >= xc_room) {
+
+			if (Xc(xc_size) >= (xc + xc_room)) {
 			    printf("! realloc\n");
-			    xc_room += 100000000 / sizeof(hash);
-			    xc = realloc(xc, xc_room * sizeof(hash));
+			    xc_room += 100000000;
+			    xc = realloc(xc, xc_room);
 			    assert(xc);
 			}
 		    }
@@ -326,8 +327,8 @@ void basicSolve(blake2b_state *digest, const int n, const int k)
     if (x_size > 1) {
 	int solnr = 0;
 
-	printf("- Sorting list (size %d, %ld)\n", x_size, x_size * sizeof(hash));
-	qsort_r(x, x_size, sizeof(hash), compareSR, (int *)&hashLen);
+	printf("- Sorting list (size %d, %ld)\n", x_size, x_size * (hashLen + lenIndices));
+	qsort_r(x, x_size, (hashLen + lenIndices), compareSR, (int *)&hashLen);
 	printf("- Finding collisions\n");
 	for (int i = 0; i < x_size - 1; ) {
 	    int j = 1;
