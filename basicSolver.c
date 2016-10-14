@@ -16,6 +16,12 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdbool.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <errno.h>
 #include <assert.h>
 
 #include <blake2.h>
@@ -23,6 +29,15 @@
 
 #define swap(a, b) \
     do { __typeof__(a) __tmp = (a); (a) = (b); (b) = __tmp; } while (0)
+
+int debug = 1;
+#define D(x...) if (debug) fprintf(stderr, x);
+
+static void dump_hex(uint8_t *data, size_t len)
+{
+    for (int i = 0; i < len; ++i)
+	printf("%02x", data[i]);
+}
 
 /* Writes Zcash personalization string. */
 static void zcashPerson(uint8_t *person, const int n, const int k)
@@ -39,8 +54,7 @@ static void digestInit(blake2b_state *S, const int n, const int k)
     memset(P, 0, sizeof(blake2b_param));
     P->fanout        = 1;
     P->depth         = 1;
-    P->digest_length = n / 8; /* Never used. */
-    P->digest_length = (512 / n) * n / 8; /* Never used. */
+    P->digest_length = (512 / n) * n / 8;
     zcashPerson(P->personal, n, k);
     blake2b_init_param(S, P);
 }
@@ -169,13 +183,16 @@ static int hasCollision(const uint8_t *a, const uint8_t *b, const size_t len)
     return memcmp(a, b, len) == 0;
 }
 
-static int getIndices(const uint8_t *hash, size_t len, size_t lenIndices, size_t cBitLen)
+static int getIndices(const uint8_t *hash, size_t len, size_t lenIndices, size_t cBitLen,
+    uint8_t *data, size_t maxLen)
 {
     assert(((cBitLen + 1) + 7) / 8 <= sizeof(uint32_t));
-    size_t minLen = (cBitLen + 1) * lenIndices / ( 8 * sizeof(uint32_t));
+    size_t minLen = (cBitLen + 1) * lenIndices / (8 * sizeof(uint32_t));
     size_t bytePad = sizeof(uint32_t) - ((cBitLen + 1 ) + 7 ) / 8;
-    uint8_t data[minLen];
-    compressArray(hash + len, lenIndices, data, minLen, cBitLen + 1, bytePad);
+    if (minLen > maxLen)
+	return -1;
+    if (data)
+	compressArray(hash + len, lenIndices, data, minLen, cBitLen + 1, bytePad);
     return minLen;
 }
 
@@ -208,7 +225,10 @@ static int isZero(const uint8_t *hash, size_t len)
     return 1;
 }
 
-void basicSolve(blake2b_state *digest, const int n, const int k)
+static int basicSolve(blake2b_state *digest,
+    const int n, const int k,
+    bool (*validBlock)(void*, const unsigned char*),
+    void* validBlockData)
 {
     const int collisionBitLength  = n / (k + 1);
     const int collisionByteLength = (collisionBitLength + 7) / 8;
@@ -220,14 +240,14 @@ void basicSolve(blake2b_state *digest, const int n, const int k)
     const int equihashSolutionSize = (1 << k) * (n / (k + 1) + 1) / 8;
 
     // In comments values for n=200, k=9
-    printf(": n %d, k %d\n",              n, k);                 //  200, 9
-    printf(": collisionBitLength %d\n",   collisionBitLength);   //   20
-    printf(": collisionByteLength %d\n",  collisionByteLength);  //    3
-    printf(": hashLength %d\n",           hashLength);           //   30
-    printf(": indicesPerHashOutput %d\n", indicesPerHashOutput); //    2
-    printf(": hashOutput %d\n",           hashOutput);           //   50
-    printf(": fullWidth %d\n",            fullWidth);            // 1030
-    printf(": initSize %d (memory %u)\n",
+    D(": n %d, k %d\n",              n, k);                 //  200, 9
+    D(": collisionBitLength %d\n",   collisionBitLength);   //   20
+    D(": collisionByteLength %d\n",  collisionByteLength);  //    3
+    D(": hashLength %d\n",           hashLength);           //   30
+    D(": indicesPerHashOutput %d\n", indicesPerHashOutput); //    2
+    D(": hashOutput %d\n",           hashOutput);           //   50
+    D(": fullWidth %d\n",            fullWidth);            // 1030
+    D(": initSize %d (memory %u)\n",
        	initSize, initSize * fullWidth); // 2097152, 2160066560
 
     uint8_t hash[fullWidth];
@@ -242,7 +262,7 @@ void basicSolve(blake2b_state *digest, const int n, const int k)
 
     uint8_t tmpHash[hashOutput];
     uint32_t x_size = 0, xc_size = 0;
-    printf("Generating first list\n");
+    D("Generating first list\n");
     for (uint32_t g = 0; x_size < initSize; g++) {
 	generateHash(digest, g, tmpHash, hashOutput);
 	//if (g == 0) dump_hex(tmpHash, hashOutput);
@@ -261,11 +281,11 @@ void basicSolve(blake2b_state *digest, const int n, const int k)
     size_t lenIndices = sizeof(uint32_t); /* Byte length of indices array;
 					     doubles with every round. */
     for (int r = 1; r < k && x_size > 0; r++) {
-	printf("Round %d:\n", r);
-	printf("- Sorting list (size %d, %ld)\n", x_size, x_size * sizeof(hash));
+	D("Round %d:\n", r);
+	D("- Sorting list (size %d, %ld)\n", x_size, x_size * sizeof(hash));
 	qsort_r(x, x_size, sizeof(hash), compareSR, (int *)&collisionByteLength);
 
-	printf("- Finding collisions\n");
+	D("- Finding collisions\n");
 	for (int i = 0; i < x_size - 1; ) {
 	    // 2b) Find next set of unordered pairs with collisions on the next n/(k+1) bits
 	    int j = 1;
@@ -305,13 +325,12 @@ void basicSolve(blake2b_state *digest, const int n, const int k)
     } /* step 2 */
 
     // k+1) Find a collision on last 2n(k+1) bits
-    printf("Final round:\n");
+    D("Final round:\n");
+    int solnr = 0;
     if (x_size > 1) {
-	int solnr = 0;
-
-	printf("- Sorting list (size %d, %ld)\n", x_size, x_size * sizeof(hash));
+	D("- Sorting list (size %d, %ld)\n", x_size, x_size * sizeof(hash));
 	qsort_r(x, x_size, sizeof(hash), compareSR, (int *)&hashLen);
-	printf("- Finding collisions\n");
+	D("- Finding collisions\n");
 	for (int i = 0; i < x_size - 1; ) {
 	    int j = 1;
 	    while (i + j < x_size && hasCollision(X(i), X(i + j), hashLen)) {
@@ -323,15 +342,24 @@ void basicSolve(blake2b_state *digest, const int n, const int k)
 		    combineRows(Xc(xc_size), X(i + l), X(i + m), hashLen, lenIndices, 0);
 		    if (isZero(Xc(xc_size), hashLen) &&
 		       	distinctIndices(X(i + l), X(i + m), hashLen, lenIndices)) {
-			int ssize = getIndices(Xc(xc_size), hashLen, 2 * lenIndices, collisionBitLength);
+			uint8_t soln[equihashSolutionSize];
+			int ssize = getIndices(Xc(xc_size), hashLen, 2 * lenIndices, collisionBitLength,
+			    soln, sizeof(soln));
 			++solnr;
-			printf("+ collision of size %d (%d)\n", equihashSolutionSize, ssize);
+			D("+ collision of size %d (%d)\n", equihashSolutionSize, ssize);
 			assert(equihashSolutionSize == ssize);
 #if 1
 			for (int y = 0; y < 2 * lenIndices; y += sizeof(uint32_t))
-			    printf(" %u", arrayToEhIndex(Xc(xc_size) + hashLen + y));
-			printf("\n");
+			    D(" %u", arrayToEhIndex(Xc(xc_size) + hashLen + y));
+			D("\n");
 #endif
+			if (validBlock) {
+			    validBlock(validBlockData, soln);
+			    D("+ valid\n");
+			    goto out;
+			}
+			dump_hex(soln, equihashSolutionSize);
+			printf("\n");
 		    }
 		    ++xc_size;
 		    assert(xc_size < xc_room);
@@ -339,9 +367,28 @@ void basicSolve(blake2b_state *digest, const int n, const int k)
 	    }
 	    i += j;
 	}
-	printf("- Found %d solutions.\n", solnr);
+	D("- Found %d solutions.\n", solnr);
     } else
-	printf("- List is empty\n");
+	D("- List is empty\n");
+out:
+    free(x);
+    free(xc);
+    return solnr;
+}
+
+// API wrapper
+int SolverFunction(const unsigned char* input,
+    bool (*validBlock)(void*, const unsigned char*),
+    void* validBlockData,
+    bool (*cancelled)(void*),
+    void* cancelledData,
+    int numThreads,
+    int n, int k)
+{
+    blake2b_state digest[1];
+    digestInit(digest, n, k);
+    blake2b_update(digest, input, 140);
+    return basicSolve(digest, n, k, NULL, NULL);
 }
 
 static void hashNonce(blake2b_state *S, uint32_t nonce)
@@ -354,26 +401,78 @@ static void hashNonce(blake2b_state *S, uint32_t nonce)
 
 int main(int argc, char **argv)
 {
-    blake2b_state digest[1];
-    int n, k;
-    char *ii = "block header";
-    uint64_t nonce = 0;
+    int       n = 200;
+    int       k = 9;
+    char    *ii = "block header";
+    uint32_t nn = 0;
+    int threads = 0;
+    char *input = NULL;
+    int  tFlags = 0;
+    int opt;
 
-    if (argc < 3) {
-	printf("%s N K [I] [nonce]\n", argv[0]);
+    while ((opt = getopt(argc, argv, "qn:k:N:I:t:i:h")) != -1) {
+	switch (opt) {
+	    case 'q':
+		debug = 0;
+		break;
+	    case 'n':
+		n = atoi(optarg);
+		break;
+	    case 'k':
+		k = atoi(optarg);
+		break;
+	    case 'N':
+		nn = strtoul(optarg, NULL, 0);
+		tFlags = 1;
+		break;
+	    case 'I':
+		ii = strdup(optarg);
+		tFlags = 2;
+		break;
+	    case 't':
+		threads = atoi(optarg); /* ignored */
+		break;
+	    case 'i':
+		input = strdup(optarg);
+		break;
+	    case 'h':
+	    default:
+		fprintf(stderr, "Solver CPI API mode:\n");
+		fprintf(stderr, "  %s -i input -n N -k K\n", argv[0]);
+		fprintf(stderr, "Test vector mode:\n");
+		fprintf(stderr, "  %s [-n N] [-k K] [-I string] [-N nonce]\n", argv[0]);
+		exit(1);
+	}
+    }
+    if (tFlags && input) {
+	fprintf(stderr, "Test vector parameters (-I, -N) cannot be used together with input (-i)\n");
 	exit(1);
     }
-    if (argc >= 3) {
-	n = atoi(argv[1]);
-	k = atoi(argv[2]);
-    }
-    if (argc >= 4)
-	ii = argv[3];
-    if (argc >= 5)
-	nonce = atoi(argv[4]);
 
-    digestInit(digest, n, k);
-    blake2b_update(digest, (uint8_t *)ii, strlen(ii));
-    hashNonce(digest, nonce);
-    basicSolve(digest, n, k);
+    if (input) {
+	uint8_t block_header[140];
+	int fd = open(input, O_RDONLY);
+	if (fd == -1) {
+	    fprintf(stderr, "open: %s: %s\n", input, strerror(errno));
+	    exit(1);
+	}
+	int i = read(fd, block_header, sizeof(block_header));
+	if (i == -1) {
+	    fprintf(stderr, "read: %s: %s\n", input, strerror(errno));
+	    exit(1);
+	} else if (i != sizeof(block_header)) {
+	    fprintf(stderr, "read: %s: Zcash block header is not full\n", input);
+	    exit(1);
+	}
+	close(fd);
+
+	int ret = SolverFunction(block_header, NULL, NULL, NULL, NULL, 1, n, k);
+	exit(ret < 0);
+    } else {
+	blake2b_state digest[1];
+	digestInit(digest, n, k);
+	blake2b_update(digest, (uint8_t *)ii, strlen(ii));
+	hashNonce(digest, nn);
+	basicSolve(digest, n, k, NULL, NULL);
+    }
 }

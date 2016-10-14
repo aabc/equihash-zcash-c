@@ -7,7 +7,10 @@ cd equihash-zcash-c
 git submodule init
 git submodule update
 make
-./basicSolver 96 5 'block header' 0
-./basicSolver-opt 200 9 'block header' 1
+./basicSolver -n 96 -k 5 -I 'block header' -N 0
+./basicSolver-opt -n 200 -k 9 -I 'block header' -N 1
 ```
-
+You can use Zcash Solver CLI API:
+```
+./basicSolver-opt -n 200 -k 9 -i input.bin
+```
