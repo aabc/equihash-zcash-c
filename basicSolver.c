@@ -354,9 +354,11 @@ static int basicSolve(blake2b_state *digest,
 			D("\n");
 #endif
 			if (validBlock) {
-			    validBlock(validBlockData, soln);
-			    D("+ valid\n");
-			    goto out;
+			    if (validBlock(validBlockData, soln)) {
+				D("+ valid\n");
+			    } else {
+				D("+ NOT VALID\n");
+			    }
 			}
 			dump_hex(soln, equihashSolutionSize);
 			printf("\n");
@@ -370,25 +372,69 @@ static int basicSolve(blake2b_state *digest,
 	D("- Found %d solutions.\n", solnr);
     } else
 	D("- List is empty\n");
-out:
+
     free(x);
     free(xc);
     return solnr;
 }
 
+struct validData {
+    int n;
+    int k;
+    blake2b_state *digest;
+};
+
+bool basicValidator(void *data, const unsigned char *soln)
+{
+    const struct validData *v = data;
+    const int n = v->n;
+    const int k = v->k;
+    blake2b_state *digest = v->digest;
+    const int collisionBitLength  = n / (k + 1);
+    const int collisionByteLength = (collisionBitLength + 7) / 8;
+    const int hashLength = (k + 1) * collisionByteLength;
+    const int indicesPerHashOutput = 512 / n;
+    const int hashOutput = indicesPerHashOutput * n / 8;
+    const int equihashSolutionSize = (1 << k) * (n / (k + 1) + 1) / 8;
+    const int solnr = 1 << k;
+    uint32_t indices[solnr];
+
+    expandArray(soln, equihashSolutionSize, (unsigned char *)&indices, sizeof(indices), collisionBitLength + 1, 1);
+    D("Validate:");
+    uint8_t vHash[hashLength];
+    memset(vHash, 0 , sizeof(vHash));
+    for (int j = 0; j < solnr; j++) {
+	uint8_t tmpHash[hashOutput];
+	uint8_t hash[hashLength];
+	int i = be32toh(indices[j]);
+	D(" %d", i);
+	generateHash(digest, i / indicesPerHashOutput, tmpHash, hashOutput);
+	expandArray(tmpHash + (i % indicesPerHashOutput * n / 8), n / 8, hash, hashLength, collisionBitLength, 0);
+	for (int k = 0; k < hashLength; ++k)
+	    vHash[k] ^= hash[k];
+    }
+    D("\n");
+    return isZero(vHash, sizeof(vHash));
+}
+
 // API wrapper
-int SolverFunction(const unsigned char* input,
-    bool (*validBlock)(void*, const unsigned char*),
-    void* validBlockData,
-    bool (*cancelled)(void*),
+int SolverFunction(const unsigned char *input,
+    bool (*validBlock)(void*, const unsigned char *),
+    void *validBlockData,
+    bool (*cancelled)(void *),
     void* cancelledData,
     int numThreads,
     int n, int k)
 {
     blake2b_state digest[1];
+    struct validData valData = { .n = n, .k = k, .digest = digest };
     digestInit(digest, n, k);
     blake2b_update(digest, input, 140);
-    return basicSolve(digest, n, k, NULL, NULL);
+    if (!validBlock) {
+	validBlock     = basicValidator;
+	validBlockData = &valData;
+    }
+    return basicSolve(digest, n, k, validBlock, &validBlockData);
 }
 
 static void hashNonce(blake2b_state *S, uint32_t nonce)
@@ -405,7 +451,7 @@ int main(int argc, char **argv)
     int       k = 9;
     char    *ii = "block header";
     uint32_t nn = 0;
-    int threads = 0;
+    int threads = 1;
     char *input = NULL;
     int  tFlags = 0;
     int opt;
@@ -466,13 +512,14 @@ int main(int argc, char **argv)
 	}
 	close(fd);
 
-	int ret = SolverFunction(block_header, NULL, NULL, NULL, NULL, 1, n, k);
+	int ret = SolverFunction(block_header, NULL, NULL, NULL, NULL, threads, n, k);
 	exit(ret < 0);
     } else {
 	blake2b_state digest[1];
+	struct validData valData = { .n = n, .k = k, .digest = digest };
 	digestInit(digest, n, k);
 	blake2b_update(digest, (uint8_t *)ii, strlen(ii));
 	hashNonce(digest, nn);
-	basicSolve(digest, n, k, NULL, NULL);
+	basicSolve(digest, n, k, basicValidator, &valData);
     }
 }
