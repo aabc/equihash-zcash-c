@@ -434,7 +434,7 @@ int SolverFunction(const unsigned char *input,
 	validBlock     = basicValidator;
 	validBlockData = &valData;
     }
-    return basicSolve(digest, n, k, validBlock, &validBlockData);
+    return basicSolve(digest, n, k, validBlock, validBlockData);
 }
 
 static void hashNonce(blake2b_state *S, uint32_t nonce)
